@@ -52,6 +52,51 @@ public:
 
 DECLARE_FACTORY(ExecuteFilterActionFactory);
 
+class ExecuteFilterMultiActions
+    : public Matcher::ActionBase<envoy::extensions::filters::http::composite::v3::ExecuteFilterMultiActions> {
+public:
+  explicit ExecuteFilterMultiActions(std::vector<Http::FilterFactoryCb> callbacks_) : callbacks_(std::move(callbacks_)) {}
+
+  void createMultiFilters(Http::FilterChainFactoryCallbacks& callbacks) const;
+
+private:
+  std::vector<Http::FilterFactoryCb> callbacks_;
+};
+
+class ExecuteFilterMultiActionFactory
+    : public Matcher::ActionFactory<Http::Matching::HttpFilterActionContext> {
+public:
+  std::string name() const override { return "composite-multi-action"; }
+  Matcher::ActionFactoryCb
+  createActionFactoryCb(const Protobuf::Message& config,
+                        Http::Matching::HttpFilterActionContext& context,
+                        ProtobufMessage::ValidationVisitor& validation_visitor) override {
+    const auto& composite_action = MessageUtil::downcastAndValidate<
+        const envoy::extensions::filters::http::composite::v3::ExecuteFilterMultiActions&>(
+        config, validation_visitor);
+
+    std::vector<Http::FilterFactoryCb> callbacks;
+    for (auto extension_config : composite_action.extensions_config()) {
+      auto& factory =
+          Config::Utility::getAndCheckFactory<Server::Configuration::NamedHttpFilterConfigFactory>(
+              extension_config);
+      ProtobufTypes::MessagePtr message = Config::Utility::translateAnyToFactoryConfig(
+          extension_config.typed_config(), validation_visitor, factory);
+      auto callback = factory.createFilterFactoryFromProto(*message, context.stat_prefix_,
+                                                           context.factory_context_);
+      callbacks.push_back(callback);
+    }
+    return [callbacks = std::move(callbacks)]() -> Matcher::ActionPtr {
+      return std::make_unique<ExecuteFilterMultiActions>(callbacks);
+    };
+  }
+  ProtobufTypes::MessagePtr createEmptyConfigProto() override {
+    return std::make_unique<
+        envoy::extensions::filters::http::composite::v3::ExecuteFilterMultiActions>();
+  }
+};
+DECLARE_FACTORY(ExecuteFilterMultiActionFactory);
+
 } // namespace Composite
 } // namespace HttpFilters
 } // namespace Extensions

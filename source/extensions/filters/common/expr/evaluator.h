@@ -9,6 +9,7 @@
 #include "eval/public/activation.h"
 #include "eval/public/cel_expression.h"
 #include "eval/public/cel_value.h"
+#include "google/api/expr/syntax.proto.h"
 
 namespace Envoy {
 namespace Extensions {

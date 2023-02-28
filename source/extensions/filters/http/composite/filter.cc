@@ -76,10 +76,16 @@ void Filter::encodeComplete() {
   }
 }
 void Filter::onMatchCallback(const Matcher::Action& action) {
-  const auto& composite_action = action.getTyped<ExecuteFilterAction>();
+  // const auto& composite_action = action.getTyped<ExecuteFilterAction>();
+
+  // FactoryCallbacksWrapper wrapper(*this, dispatcher_);
+  // composite_action.createFilters(wrapper);
+
+  const auto& composite_actions = action.getTyped<ExecuteFilterMultiActions>();
 
   FactoryCallbacksWrapper wrapper(*this, dispatcher_);
-  composite_action.createFilters(wrapper);
+  composite_actions.createMultiFilters(wrapper);
+
 
   if (!wrapper.errors_.empty()) {
     stats_.filter_delegation_error_.inc();
