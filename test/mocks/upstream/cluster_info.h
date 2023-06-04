@@ -105,6 +105,11 @@ public:
         circuit_breakers_stats_, budget_percent, min_retry_concurrency);
   }
 
+  envoy::config::core::v3::Metadata* mutateMetadata() {
+    envoy::config::core::v3::Metadata* mutate_data =
+        const_cast<envoy::config::core::v3::Metadata*>(&metadata_);
+    return mutate_data;
+  }
   // Upstream::ClusterInfo
   MOCK_METHOD(bool, addedViaApi, (), (const));
   MOCK_METHOD(std::chrono::milliseconds, connectTimeout, (), (const));

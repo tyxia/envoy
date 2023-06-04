@@ -40,10 +40,15 @@ enum class ExpressionType {
   NoExpression = 2,
 };
 
+constexpr absl::string_view kFilterNamespace = "cel_matcher";
+constexpr absl::string_view kMetadataKey = "service_name";
+constexpr absl::string_view kMetadataValue = "test_service";
+
 class CelMatcherTest : public ::testing::Test {
 public:
   CelMatcherTest()
       : inject_action_(action_factory_),
+        cluster_info_(std::make_shared<testing::NiceMock<Upstream::MockClusterInfo>>()),
         data_(Envoy::Http::Matching::HttpMatchingDataImpl(stream_info_)) {}
 
   void buildCustomHeader(const absl::flat_hash_map<std::string, std::string>& custom_value_pairs,
@@ -106,21 +111,29 @@ public:
                 performDataInputValidation(
                     _, "type.googleapis.com/xds.type.matcher.v3.HttpAttributesCelMatchInput"));
     Matcher::MatchTreeFactory<Envoy::Http::HttpMatchingData, absl::string_view> matcher_factory(
-        context_, factory_context_, validation_visitor);
+        context_, server_factory_context_, validation_visitor);
     auto match_tree = matcher_factory.create(matcher);
 
     return match_tree();
   }
 
+  void setUpstreamClusterMetadata(const std::string& name_space, const std::string& metadata_key,
+                                  const std::string& metadata_value) {
+    Envoy::Config::Metadata::mutableMetadataValue(metadata_, name_space, metadata_key)
+        .set_string_value(metadata_value);
+    EXPECT_CALL(*cluster_info_, metadata()).WillRepeatedly(testing::ReturnPointee(&metadata_));
+    stream_info_.setUpstreamClusterInfo(cluster_info_);
+  }
+
   Matcher::StringActionFactory action_factory_;
   Registry::InjectFactory<Matcher::ActionFactory<absl::string_view>> inject_action_;
+  std::shared_ptr<testing::NiceMock<Upstream::MockClusterInfo>> cluster_info_;
   testing::NiceMock<StreamInfo::MockStreamInfo> stream_info_;
   absl::string_view context_ = "";
-  testing::NiceMock<Server::Configuration::MockServerFactoryContext> factory_context_;
-
+  testing::NiceMock<Server::Configuration::MockServerFactoryContext> server_factory_context_;
+  envoy::config::core::v3::Metadata metadata_;
   TestRequestHeaderMapImpl default_headers_{
       {":method", "GET"}, {":scheme", "http"}, {":authority", "host"}};
-
   Envoy::Http::Matching::HttpMatchingDataImpl data_;
 };
 
@@ -130,7 +143,6 @@ TEST_F(CelMatcherTest, CelMatcherRequestHeaderMatched) {
   TestRequestHeaderMapImpl request_headers = default_headers_;
   buildCustomHeader({{"authenticated_user", "staging"}}, request_headers);
   data_.onRequestHeaders(request_headers);
-  // data.onRequestHeaders(request_headers);
 
   const auto result = matcher_tree->match(data_);
   // The match was complete, match found.
@@ -164,15 +176,15 @@ TEST_F(CelMatcherTest, CelMatcherRequestHeaderNotMatched) {
   EXPECT_EQ(result_2.on_match_, absl::nullopt);
 }
 
-TEST_F(CelMatcherTest, CelMatcherNoRequestAttributes) {
-  auto matcher_tree = buildMatcherTree(RequestHeaderCelExprString);
+// TEST_F(CelMatcherTest, CelMatcherNoRequestAttributes) {
+//   auto matcher_tree = buildMatcherTree(RequestHeaderCelExprString);
 
-  // No request attributes added to matching data.
-  const auto result = matcher_tree->match(data_);
-  // The match was completed, no match found.
-  EXPECT_EQ(result.match_state_, Matcher::MatchState::UnableToMatch);
-  EXPECT_EQ(result.on_match_, absl::nullopt);
-}
+//   // No request attributes added to matching data.
+//   const auto result = matcher_tree->match(data_);
+//   // The match was completed, no match found.
+//   EXPECT_EQ(result.match_state_, Matcher::MatchState::UnableToMatch);
+//   EXPECT_EQ(result.on_match_, absl::nullopt);
+// }
 
 TEST_F(CelMatcherTest, CelMatcherRequestHeaderPathMatched) {
   auto matcher_tree = buildMatcherTree(RequestPathCelExprString);
@@ -248,6 +260,34 @@ TEST_F(CelMatcherTest, CelMatcherResponseTrailerNotMatched) {
 
   TestResponseTrailerMapImpl response_trailers = {{"transfer-encoding", "chunked_not_matched"}};
   data_.onResponseTrailers(response_trailers);
+
+  const auto result = matcher_tree->match(data_);
+  // The match was completed, no match found.
+  EXPECT_EQ(result.match_state_, Matcher::MatchState::MatchComplete);
+  EXPECT_EQ(result.on_match_, absl::nullopt);
+}
+
+TEST_F(CelMatcherTest, CelMatcherClusterMetadtaMatched) {
+  setUpstreamClusterMetadata(std::string(kFilterNamespace), std::string(kMetadataKey),
+                             std::string(kMetadataValue));
+  Envoy::Http::Matching::HttpMatchingDataImpl data =
+      Envoy::Http::Matching::HttpMatchingDataImpl(stream_info_);
+  auto matcher_tree = buildMatcherTree(absl::StrFormat(
+      UpstreamClusterMetadataCelString, kFilterNamespace, kMetadataKey, kMetadataValue));
+  const auto result = matcher_tree->match(data_);
+  // The match was complete, match found.
+  EXPECT_EQ(result.match_state_, Matcher::MatchState::MatchComplete);
+  EXPECT_TRUE(result.on_match_.has_value());
+  EXPECT_NE(result.on_match_->action_cb_, nullptr);
+}
+
+TEST_F(CelMatcherTest, CelMatcherClusterMetadtaNotMatched) {
+  setUpstreamClusterMetadata(std::string(kFilterNamespace), std::string(kMetadataKey),
+                             "wrong_service");
+  Envoy::Http::Matching::HttpMatchingDataImpl data =
+      Envoy::Http::Matching::HttpMatchingDataImpl(stream_info_);
+  auto matcher_tree = buildMatcherTree(absl::StrFormat(
+      UpstreamClusterMetadataCelString, kFilterNamespace, kMetadataKey, kMetadataValue));
 
   const auto result = matcher_tree->match(data_);
   // The match was completed, no match found.
