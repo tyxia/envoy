@@ -6058,6 +6058,7 @@ TEST_F(HttpFilterTest, HttpEventTrafficStatsTest) {
   filter_->onDestroy();
 }
 
+
 } // namespace
 } // namespace ExternalProcessing
 } // namespace HttpFilters

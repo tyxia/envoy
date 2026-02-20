@@ -503,7 +503,7 @@ class Filter : public Logger::Loggable<Logger::Id::ext_proc>,
   };
 
 public:
-  Filter(const FilterConfigSharedPtr& config, ClientBasePtr&& client)
+ Filter(const FilterConfigSharedPtr& config, ClientBasePtr&& client)
       : config_(config), client_(std::move(client)), stats_(config->stats()),
         grpc_service_(config->grpcService().has_value() ? config->grpcService().value()
                                                         : envoy::config::core::v3::GrpcService()),
