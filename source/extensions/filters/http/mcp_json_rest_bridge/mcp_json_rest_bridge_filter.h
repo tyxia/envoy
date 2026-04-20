@@ -111,6 +111,15 @@ private:
   Buffer::OwnedImpl response_body_;
   std::string response_body_str_;
 
+  // Streaming encode state for ToolsCall responses.
+  // When true, encodeData writes the JSON-RPC envelope incrementally
+  // instead of buffering the full REST body before transcoding.
+  bool streaming_encode_{false};
+  bool is_error_{false};
+  bool prefix_sent_{false};
+  std::string encode_prefix_;
+  std::string encode_suffix_;
+
   McpJsonRestBridgeFilterConfigSharedPtr config_;
 };
 

@@ -106,6 +106,35 @@ int getResponseCode(Http::ResponseHeaderMapOptConstRef response_headers) {
   return status_code;
 }
 
+// Escapes the contents of a buffer as a JSON string value (without surrounding quotes).
+// Used to embed an arbitrary REST response body inside a JSON "text" field without
+// materializing the entire body into a single contiguous allocation first.
+std::string jsonEscapeBuffer(const Buffer::Instance& buffer) {
+  std::string result;
+  for (const Buffer::RawSlice& slice : buffer.getRawSlices()) {
+    const char* p = static_cast<const char*>(slice.mem_);
+    for (size_t i = 0; i < slice.len_; ++i) {
+      const unsigned char c = static_cast<unsigned char>(p[i]);
+      switch (c) {
+      case '"':  result += "\\\""; break;
+      case '\\': result += "\\\\"; break;
+      case '\b': result += "\\b";  break;
+      case '\f': result += "\\f";  break;
+      case '\n': result += "\\n";  break;
+      case '\r': result += "\\r";  break;
+      case '\t': result += "\\t";  break;
+      default:
+        if (c < 0x20) {
+          result += fmt::format("\\u{:04x}", static_cast<unsigned int>(c));
+        } else {
+          result += static_cast<char>(c);
+        }
+      }
+    }
+  }
+  return result;
+}
+
 bool validateRequestMcpVersion(absl::string_view method,
                                Http::RequestHeaderMapOptConstRef request_headers,
                                absl::string_view fallback_protocol_version) {
@@ -231,7 +260,7 @@ Http::FilterDataStatus McpJsonRestBridgeFilter::decodeData(Buffer::Instance& dat
   return Http::FilterDataStatus::Continue;
 }
 
-Http::FilterHeadersStatus McpJsonRestBridgeFilter::encodeHeaders(Http::ResponseHeaderMap&,
+Http::FilterHeadersStatus McpJsonRestBridgeFilter::encodeHeaders(Http::ResponseHeaderMap& response_headers,
                                                                  bool end_stream) {
   switch (mcp_operation_) {
   case McpOperation::Unspecified:
@@ -250,8 +279,36 @@ Http::FilterHeadersStatus McpJsonRestBridgeFilter::encodeHeaders(Http::ResponseH
   // or throw exceptions because they expect a valid JSON-RPC response with a
   // matching ID. Envoy should generate a synthetic JSON-RPC response (e.g., an
   // empty ToolResult or a generic error) to ensure client stability.
-  return end_stream ? Http::FilterHeadersStatus::Continue
-                    : Http::FilterHeadersStatus::StopIteration;
+  if (end_stream) {
+    return Http::FilterHeadersStatus::Continue;
+  }
+
+  // For ToolsCall, stream the response incrementally to avoid buffering the full
+  // REST body before transcoding. The HTTP status code is available now so we can
+  // determine isError and build the fixed prefix/suffix of the JSON-RPC envelope.
+  // ToolsList and OperationFailed still buffer because their bodies must be parsed
+  // as JSON before embedding (ToolsList) or are small filter-generated errors (OperationFailed).
+  if (mcp_operation_ == McpOperation::ToolsCall) {
+    int status_code;
+    is_error_ = !absl::SimpleAtoi(response_headers.getStatusValue(), &status_code) ||
+                status_code >= static_cast<int>(Http::Code::BadRequest);
+
+    // Build the immutable prefix and suffix of the JSON-RPC envelope.
+    // encodeData will stream: prefix | json-escaped body chunks | suffix
+    encode_prefix_ = absl::StrCat(
+        R"({"jsonrpc":"2.0","id":)", session_id_->dump(),
+        R"(,"result":{"content":[{"type":"text","text":")");
+    encode_suffix_ = absl::StrCat(
+        R"("}],"isError":)", is_error_ ? "true" : "false", "}}");
+
+    // Remove Content-Length: the escaped body size differs from the raw REST body size.
+    response_headers.removeContentLength();
+    response_headers.setContentType(Http::Headers::get().ContentTypeValues.Json);
+    streaming_encode_ = true;
+    return Http::FilterHeadersStatus::Continue;
+  }
+
+  return Http::FilterHeadersStatus::StopIteration;
 }
 
 Http::FilterDataStatus McpJsonRestBridgeFilter::encodeData(Buffer::Instance& data,
@@ -262,6 +319,25 @@ Http::FilterDataStatus McpJsonRestBridgeFilter::encodeData(Buffer::Instance& dat
       mcp_operation_ == McpOperation::InitializationAck) {
     return Http::FilterDataStatus::Continue;
   }
+
+  // Streaming path for ToolsCall: JSON-escape each chunk as it arrives and
+  // wrap with the pre-built JSON-RPC envelope prefix/suffix. No full buffering.
+  if (streaming_encode_) {
+    std::string escaped = jsonEscapeBuffer(data);
+    data.drain(data.length());
+    if (!prefix_sent_) {
+      data.add(encode_prefix_);
+      prefix_sent_ = true;
+    }
+    data.add(escaped);
+    if (end_stream) {
+      data.add(encode_suffix_);
+    }
+    return Http::FilterDataStatus::Continue;
+  }
+
+  // Buffering path for ToolsList and OperationFailed: accumulate the full body
+  // before transcoding since those cases require parsing the body as JSON.
   response_body_.move(data);
 
   if (!end_stream) {
